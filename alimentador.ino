@@ -55,7 +55,7 @@ unsigned long timestamp_fim_prov = 0;
 #if CONFIG_IDF_TARGET_ESP32C3
 static int gpio_0 = 9;
 static int gpio_switch = 7;
-static int gpio_reset = 4;
+static int gpio_reset = 33;
 #else
 static int gpio_0 = 0;
 static int gpio_switch = 2;
@@ -110,9 +110,9 @@ void mostrarTelaPareamento() {
     if (!display_conectado) return;
     lcd.clear();
     lcd.setCursor(0, 0); 
-    lcd.print("MODO PAREAMENTO");
-    lcd.setCursor(0, 1);
     lcd.print("App > Add > BLE");
+    lcd.setCursor(0, 1);
+    lcd.print("POP: "); lcd.print(pop);
 }
 
 void sysProvEvent(arduino_event_t *sys_event) {
@@ -146,46 +146,13 @@ void sysProvEvent(arduino_event_t *sys_event) {
     }
 }
 
-bool verificarPodeDisparar() {
-    if (!dnd_ativo) return true; 
-    struct tm timeinfo;
-    if(!getLocalTime(&timeinfo, 0)) return true; 
-
-    int minutos_agora = (timeinfo.tm_hour * 60) + timeinfo.tm_min;
-    int minutos_inicio = dnd_inicio * 60; 
-    int minutos_fim = dnd_fim * 60;       
-
-    bool dentro = false;
-    if (minutos_inicio < minutos_fim) {
-        if (minutos_agora >= minutos_inicio && minutos_agora < minutos_fim) dentro = true;
-    } else {
-        if (minutos_agora >= minutos_inicio || minutos_agora < minutos_fim) dentro = true;
-    }
-
-    if (dentro) {
-        if (sessao_provisionamento_encerrada) { 
-            atualizarTela("BLOQUEADO", "Modo DND Ativo");
-            char horaBuff[10]; 
-            getHoraAtual(horaBuff, sizeof(horaBuff)); 
-            atualizarTela("ONLINE", horaBuff); 
-        }
-        return false; 
-    }
-    return true; 
-}
-
 void write_callback(Device *device, Param *param, const param_val_t val, void *priv_data, write_ctx_t *ctx)
 {
     const char *param_name = param->getParamName();
 
     if (strcmp(param_name, "Power") == 0) {
         if (val.val.b == true) {
-
-            if (!verificarPodeDisparar()) {
-                param->updateAndReport(value(false));
-                return;
-            }
-            
+          // o motor segue funcionando 
             if (millis() < momento_liberacao) {
                 if(sessao_provisionamento_encerrada) {
                     atualizarTela("COOLDOWN", "Aguarde...");
@@ -282,7 +249,7 @@ void setup()
     if (!my_switch) return;
 
     // 1º DA LISTA: Quantidade de Porções (Será lido antes de ligar o motor)
-    Param qtd("Qtd Porcoes", ESP_RMAKER_PARAM_RANGE, value(qtd_porcoes), PROP_FLAG_READ | PROP_FLAG_WRITE);
+    Param qtd("Qtd Porcoes", ESP_RMAKER_PARAM_RANGE, value(qtd_porcoes), PROP_FLAG_READ | PROP_FLAG_WRITE | PROP_FLAG_PERSIST);
     qtd.addBounds(value(1), value(5), value(1)); 
     qtd.addUIType(ESP_RMAKER_UI_SLIDER);
     my_switch->addParam(qtd);
@@ -299,16 +266,16 @@ void setup()
     tela_sw.addUIType(ESP_RMAKER_UI_TOGGLE);
     my_switch->addParam(tela_sw);
 
-    Param dnd_sw("Modo Noturno", ESP_RMAKER_PARAM_POWER, value(dnd_ativo), PROP_FLAG_READ | PROP_FLAG_WRITE);
+    Param dnd_sw("Modo Noturno", ESP_RMAKER_PARAM_POWER, value(dnd_ativo), PROP_FLAG_READ | PROP_FLAG_WRITE | PROP_FLAG_PERSIST);
     dnd_sw.addUIType(ESP_RMAKER_UI_TOGGLE);
     my_switch->addParam(dnd_sw);
 
-    Param dnd_ini("DND Inicio", ESP_RMAKER_PARAM_RANGE, value(dnd_inicio), PROP_FLAG_READ | PROP_FLAG_WRITE);
+    Param dnd_ini("DND Inicio", ESP_RMAKER_PARAM_RANGE, value(dnd_inicio), PROP_FLAG_READ | PROP_FLAG_WRITE | PROP_FLAG_PERSIST);
     dnd_ini.addBounds(value(0.0f), value(24.0f), value(0.5f)); 
     dnd_ini.addUIType(ESP_RMAKER_UI_SLIDER);
     my_switch->addParam(dnd_ini);
 
-    Param dnd_end("DND Fim", ESP_RMAKER_PARAM_RANGE, value(dnd_fim), PROP_FLAG_READ | PROP_FLAG_WRITE);
+    Param dnd_end("DND Fim", ESP_RMAKER_PARAM_RANGE, value(dnd_fim), PROP_FLAG_READ | PROP_FLAG_WRITE | PROP_FLAG_PERSIST);
     dnd_end.addBounds(value(0.0f), value(24.0f), value(0.5f)); 
     dnd_end.addUIType(ESP_RMAKER_UI_SLIDER);
     my_switch->addParam(dnd_end);
@@ -324,6 +291,43 @@ void setup()
     RMaker.enableSystemService(SYSTEM_SERV_FLAGS_ALL, 0, 0, 0);
 
     RMaker.start();
+    
+    // --- SINCRONIZAÇÃO DE MEMÓRIA ---
+    // Sincroniza Qtd Porcoes
+    param_handle_t *param_qtd = my_switch->getParamByName("Qtd Porcoes");
+    if (param_qtd) {
+        esp_rmaker_param_val_t *val_qtd = esp_rmaker_param_get_val(param_qtd);
+        if (val_qtd) {
+            qtd_porcoes = val_qtd->val.i;
+        }
+    }
+
+    // Sincroniza Modo Noturno (Booleano)
+    param_handle_t *param_dnd = my_switch->getParamByName("Modo Noturno");
+    if (param_dnd) {
+        const esp_rmaker_param_val_t *val_dnd = esp_rmaker_param_get_val(param_dnd);
+        if (val_dnd) {
+            dnd_ativo = val_dnd->val.b;
+        }
+    }
+
+    // Sincroniza DND Inicio (Float)
+    param_handle_t *param_dnd_ini = my_switch->getParamByName("DND Inicio");
+    if (param_dnd_ini) {
+        const esp_rmaker_param_val_t *val_dnd_ini = esp_rmaker_param_get_val(param_dnd_ini);
+        if (val_dnd_ini) {
+            dnd_inicio = val_dnd_ini->val.f;
+        }
+    }
+
+    // Sincroniza DND Fim (Float)
+    param_handle_t *param_dnd_fim = my_switch->getParamByName("DND Fim");
+    if (param_dnd_fim) {
+        const esp_rmaker_param_val_t *val_dnd_fim = esp_rmaker_param_get_val(param_dnd_fim);
+        if (val_dnd_fim) {
+            dnd_fim = val_dnd_fim->val.f;
+        }
+    }
 
     my_switch->updateAndReportParam(ESP_RMAKER_DEF_POWER_NAME, false);
 
@@ -459,7 +463,7 @@ void loop()
     if (digitalRead(gpio_reset) == LOW) {
         delay(200); 
         if (digitalRead(gpio_reset) == LOW) { 
-            RMakerWiFiReset(2); 
+            RMakerFactoryReset(2); 
             while(true) delay(100); 
         }
     }
